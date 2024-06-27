@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: helloworld-config
+data:
+  HERE: "1"
+  IS: "2"
+  SOME: "3"
+  CONFIG: "4"
+  TO_IMPLEMENT: "5"
+  OR_ADD: "HERE_SOME_VALUE"

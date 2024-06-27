@@ -1,0 +1,183 @@
+stages:
+  - build-code
+  - sonarqube #additional stage
+  - build-image
+  - sysdig_scanner #additional stage
+  - push-to-kubernetes
+
+variables:
+  MAVEN_OPTS: >-
+    -Dhttps.protocols=TLSv1.2
+    -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository
+    -Dorg.slf4j.simpleLogger.showDateTime=true
+    -Djava.awt.headless=true
+
+  MAVEN_CLI_OPTS: >-
+    --batch-mode
+    --errors
+    --fail-at-end
+    --show-version
+    --no-transfer-progress
+    -DinstallAtEnd=true
+    -DdeployAtEnd=true
+
+build-code:
+  image: maven:3.8.1-openjdk-17-slim
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'develop' #this is branch want to deploy
+    - if: $CI_COMMIT_BRANCH == 'production'
+  cache:
+    paths:
+      - $CI_PROJECT_DIR/.m2/repository
+  stage: build-code
+  tags:
+    - code #this us identifier for runner
+  before_script:
+    - apt-get update && apt-get upgrade -y
+    - mvn -v
+    - echo $CI_PROJECT_DIR
+  script:
+    - echo "Hello $CI_COMMIT_AUTHOR, we will build your code"
+    - echo $PWD
+    - java --version
+    - mvn clean package -Dmaven.test.skip=true
+    - ls -al target/
+  artifacts:
+    paths:
+      - target/*jar
+
+#this stage is additional to more secure code
+sonarqube-job:
+  services:
+    - docker:18.09.7-dind
+  stage: sonarqube
+  script:
+    - echo "Step Quality Code"
+    - ls -al
+    - sonar-scanner
+  only:
+    - develop
+    - production
+  allow_failure: true
+  except:
+    - trigger
+
+build-push-image:
+  stage: build-image
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'dev'
+    - if: $CI_COMMIT_BRANCH == 'production'
+  image: 
+    name: amazon/aws-cli
+    entrypoint: [""]
+  tags:
+    - image
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_REGISTRY: $DOCKER_REGISTRY
+    DOCKER_U: $DOCKER_U
+    DOCKER_P: $DOCKER_P
+    APP_NAME: HELLOWORLD
+  services:
+    - docker:dind
+  before_script:
+    - amazon-linux-extras install docker
+    - docker version
+    - export DOCKER_REGISTRY=$DOCKER_REGISTRY
+    - export DOCKER_U=$DOCKER_U
+    - export DOCKER_p=$DOCKER_P
+  script:
+    - ls -l target
+    - echo $PWD
+    - date
+    - docker build -f Dockerfile -t $DOCKER_REGISTRY/$APP_NAME:deploy-$CI_PIPELINE_ID .
+    - docker image ls
+    - docker tag $DOCKER_REGISTRY/$APP_NAME:deploy-$CI_PIPELINE_ID $DOCKER_REGISTRY/$APP_NAME:latest #to make sure this image get tag latest also
+    - docker login -u $DOCKER_U -p $DOCKER_P $DOCKER_REGISTRY
+    - docker push $DOCKER_REGISTRY/$APP_NAME:deploy-$CI_PIPELINE_ID
+    - docker push $DOCKER_REGISTRY/$APP_NAME:latest
+
+#this stage is additional to more secure code
+sysdig_scanner:
+  image: sysdig
+  services:
+    - docker:18.09-dind
+  stage: sysdig_scanner
+  variables:
+    env: "nonprod"
+  script:
+    - set_environment $env
+    - export REPOSITORY_URL=$DOCKER_REGISTRY/$APP_NAME
+    - docker login -u $DOCKER_U -p $DOCKER_P $DOCKER_REGISTRY
+    - ./sysdig-cli-scanner --apiurl <your-sysdig-api-url> $DOCKER_REGISTRY/$APP_NAME:deploy-$CI_PIPELINE_ID
+  allow_failure: true
+  only:
+    - staging
+    - /^feature-.*$/
+
+# this is example to deploy via AWS EKS namespace dev
+deploy-kubernetes-dev:
+  stage: push-to-kubernetes
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'develop'
+  image: 
+    name: alpine/k8s:1.24.13
+    entrypoint: [""]
+  tags:
+    - kubernetes
+  variables:
+    AWS_DEFAULT_REGION: ap-southeast-1
+    CLUSTER_NAME: YOUR_CLUSTERNAME
+    NAMESPACE_NAME: develop
+    APP_NAME: HELLOWORLD
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  before_script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+    - sed -i "s#latest#deploy-$CI_PIPELINE_ID#g" deployment.yml
+  script:
+    - aws --version
+    - aws sts get-caller-identity
+    - aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - kubectl version
+    - cat deployment.yml
+    - echo "Hello $CI_COMMIT_AUTHOR, your code will be deploy to $NAMESPACE_NAME"
+    - kubectl delete deployment $APP_NAME -n $NAMESPACE_NAME
+    - kubectl get deployment -n $NAMESPACE_NAME
+    - kubectl apply -f deployment.yml -n $NAMESPACE_NAME
+
+# this is example to deploy via AWS EKS namespace production
+deploy-kubernetes-prod:
+  stage: push-to-kubernetes
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'production'
+  image: 
+    name: alpine/k8s:1.24.13
+    entrypoint: [""]
+  tags:
+    - kubernetes
+  variables:
+    AWS_DEFAULT_REGION: ap-southeast-1
+    CLUSTER_NAME: YOUR_CLUSTERNAME
+    NAMESPACE_NAME: production
+    APP_NAME: HELLOWORLD
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  before_script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+    - sed -i "s#latest#deploy-$CI_PIPELINE_ID#g" deployment.yml
+  script:
+    - aws --version
+    - aws sts get-caller-identity
+    - aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - kubectl version
+    - cat deployment.yml
+    - echo "Hello $CI_COMMIT_AUTHOR, your code will be deploy to $NAMESPACE_NAME"
+    - kubectl delete deployment $APP_NAME -n $NAMESPACE_NAME
+    - kubectl get deployment -n $NAMESPACE_NAME
+    - kubectl apply -f deployment.yml -n $NAMESPACE_NAME
